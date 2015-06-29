@@ -76,6 +76,7 @@ class FileMetadata(db.Model):
   wordcount_link = db.StringProperty()
   index_link = db.StringProperty()
   phrases_link = db.StringProperty()
+  charactercount_link = db.StringProperty()
 
   @staticmethod
   def getFirstKeyForUser(username):
@@ -171,6 +172,8 @@ class IndexHandler(webapp2.RequestHandler):
       pipeline = WordCountPipeline(filekey, blob_key)
     elif self.request.get("index"):
       pipeline = IndexPipeline(filekey, blob_key)
+    elif self.request.get("character_count"):
+      pipeline = CharacterCountPipeline(filekey, blob_key)
     else:
       pipeline = PhrasesPipeline(filekey, blob_key)
 
@@ -190,6 +193,24 @@ def split_into_words(s):
   s = re.sub(r"\W+", " ", s)
   s = re.sub(r"[_0-9]+", " ", s)
   return s.split()
+
+def split_into_characters(s):
+  """Split a word into a list of characters."""
+  return list(s)
+
+def character_count_map(data):
+  """Character count map function"""
+  (entry, text_fn) = data
+  text = text_fn()
+  logging.debug("Got %s", entry.filename)
+  for s in split_into_sentences(text):
+    for w in split_into_words(s.lower()):
+      for c in split_into_characters(w):
+        yield (c, "")
+
+def character_count_reduce(key, values):
+  """Character count reduce function."""
+  yield "%s: %d\n" % (key, len(values))
 
 
 def word_count_map(data):
@@ -256,6 +277,36 @@ def phrases_reduce(key, values):
   for filename, count in counts.items():
     if count > threshold:
       yield "%s:%s\n" % (words, filename)
+
+class CharacterCountPipeline(base_handler.PipelineBase):
+  """A pipeline to run Character count demo.
+		
+  Args:
+  blobkey: blobkey to process as string. Should be a zip archive with
+  text files inside.
+  """
+
+  def run(self, filekey, blobkey):
+    logging.debug("filename is %s" % filekey)
+    bucket_name = app_identity.get_default_gcs_bucket_name()
+    output = yield mapreduce_pipeline.MapreducePipeline(
+        "character_count",
+        "main.character_count_map",
+        "main.character_count_reduce",
+        "mapreduce.input_readers.BlobstoreZipInputReader",
+        "mapreduce.output_writers.GoogleCloudStorageOutputWriter",
+        mapper_params={
+            "blob_key": blobkey,
+        },
+        reducer_params={
+            "output_writer": {
+                "bucket_name": bucket_name,
+                "content_type": "text/plain",
+            }
+        },
+        shards=16)
+    yield StoreOutput("CharacterCount", filekey, output)
+
 
 class WordCountPipeline(base_handler.PipelineBase):
   """A pipeline to run Word count demo.
@@ -370,6 +421,8 @@ class StoreOutput(base_handler.PipelineBase):
       m.index_link = url_path
     elif mr_type == "Phrases":
       m.phrases_link = url_path
+    elif mr_type == "CharacterCount":
+      m.charactercount_link = url_path
 
     m.put()
 
